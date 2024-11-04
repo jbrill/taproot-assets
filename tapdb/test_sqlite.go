@@ -22,3 +22,4 @@ func NewTestDbHandleFromPath(t *testing.T, dbPath string) *SqliteStore {
 func NewTestDBWithVersion(t *testing.T, version uint) *SqliteStore {
 	return NewTestSqliteDBWithVersion(t, version)
 }
+
