@@ -1,21 +1,24 @@
+-- Drop indices on universe_roots
+DROP INDEX IF EXISTS idx_universe_roots_asset_group_proof;
+DROP INDEX IF EXISTS idx_universe_roots_proof_type_issuance;
 
--- Drop in reverse order of dependencies
-DROP INDEX IF EXISTS idx_multiverse_leaves_composite;
-DROP INDEX IF EXISTS idx_federation_sync_composite;
-DROP INDEX IF EXISTS idx_universe_events_root_type;
-DROP INDEX IF EXISTS idx_universe_events_stats;
-DROP INDEX IF EXISTS idx_mssmt_nodes_key_lookup;
-DROP INDEX IF EXISTS idx_mssmt_nodes_namespace;
-DROP INDEX IF EXISTS idx_universe_leaves_sort;
-DROP INDEX IF EXISTS idx_universe_leaves_lookup;
-DROP INDEX IF EXISTS idx_universe_roots_issuance;
-DROP INDEX IF EXISTS idx_universe_roots_namespace;
+-- Drop indices on universe_events
+DROP INDEX IF EXISTS idx_universe_events_type_counts;
+DROP INDEX IF EXISTS idx_universe_events_universe_root_id;
+DROP INDEX IF EXISTS idx_universe_events_sync;
 
--- Update statistics
-ANALYZE universe_roots;
-ANALYZE universe_leaves;
-ANALYZE mssmt_nodes;
-ANALYZE universe_events;
-ANALYZE federation_proof_sync_log;
-ANALYZE multiverse_leaves;
-ANALYZE multiverse_roots;
+-- Drop indices on tables underlying key_group_info_view
+DROP INDEX IF EXISTS idx_asset_group_witnesses_gen_asset_id;
+
+-- Drop indices on mssmt_roots
+DROP INDEX IF EXISTS idx_mssmt_roots_hash_namespace;
+
+-- Drop indices on genesis_assets
+DROP INDEX IF EXISTS idx_genesis_assets_asset_id;
+DROP INDEX IF EXISTS idx_genesis_assets_asset_tag;
+DROP INDEX IF EXISTS idx_genesis_assets_asset_type;
+
+-- Drop indices on universe_leaves
+DROP INDEX IF EXISTS idx_universe_leaves_universe_root_id;
+DROP INDEX IF EXISTS idx_universe_leaves_asset_genesis_id;
+DROP INDEX IF EXISTS idx_universe_leaves_leaf_node_key_namespace;

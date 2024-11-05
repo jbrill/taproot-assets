@@ -1,53 +1,43 @@
--- Core universe_roots indexes
-CREATE INDEX IF NOT EXISTS idx_universe_roots_namespace 
-ON universe_roots(namespace_root, id, asset_id, group_key, proof_type);
+-- Composite index supporting joins and GROUP BY
+CREATE INDEX IF NOT EXISTS idx_universe_roots_asset_group_proof 
+ON universe_roots (asset_id, group_key, proof_type);
 
-CREATE INDEX IF NOT EXISTS idx_universe_roots_issuance 
-ON universe_roots(proof_type, group_key, id, asset_id, namespace_root);
+-- Partial index for proof_type = 'issuance'
+CREATE INDEX IF NOT EXISTS idx_universe_roots_proof_type_issuance 
+ON universe_roots (proof_type);
 
--- Universe leaves optimization
-CREATE INDEX IF NOT EXISTS idx_universe_leaves_lookup 
-ON universe_leaves(
-    leaf_node_namespace, minting_point, script_key_bytes,
-    id, leaf_node_key, universe_root_id, asset_genesis_id
-);
+-- Composite index supporting event_type and universe_root_id
+CREATE INDEX IF NOT EXISTS idx_universe_events_type_counts 
+ON universe_events (event_type, universe_root_id);
 
-CREATE INDEX IF NOT EXISTS idx_universe_leaves_sort 
-ON universe_leaves(leaf_node_namespace, id, minting_point, script_key_bytes);
+-- Separate index on universe_root_id
+CREATE INDEX IF NOT EXISTS idx_universe_events_universe_root_id 
+ON universe_events (universe_root_id);
 
--- MSSMT nodes optimization
-CREATE INDEX IF NOT EXISTS idx_mssmt_nodes_namespace 
-ON mssmt_nodes(namespace, hash_key, key, value, sum);
+-- Partial index for event_type = 'SYNC'
+CREATE INDEX IF NOT EXISTS idx_universe_events_sync 
+ON universe_events (event_type);
 
-CREATE INDEX IF NOT EXISTS idx_mssmt_nodes_key_lookup 
-ON mssmt_nodes(key, namespace, hash_key, value, sum);
+-- Indices on tables underlying key_group_info_view
+CREATE INDEX IF NOT EXISTS idx_asset_group_witnesses_gen_asset_id 
+ON asset_group_witnesses (gen_asset_id);
 
--- Universe events optimization
-CREATE INDEX IF NOT EXISTS idx_universe_events_stats 
-ON universe_events(event_type, event_timestamp);
+-- Indices on mssmt_roots
+CREATE INDEX IF NOT EXISTS idx_mssmt_roots_hash_namespace 
+ON mssmt_roots (root_hash, namespace);
 
-CREATE INDEX IF NOT EXISTS idx_universe_events_root_type 
-ON universe_events(universe_root_id, event_type);
+-- Indices on genesis_assets
+CREATE INDEX IF NOT EXISTS idx_genesis_assets_asset_id 
+ON genesis_assets (asset_id);
+CREATE INDEX IF NOT EXISTS idx_genesis_assets_asset_tag 
+ON genesis_assets (asset_tag);
+CREATE INDEX IF NOT EXISTS idx_genesis_assets_asset_type 
+ON genesis_assets (asset_type);
 
--- Federation sync log optimization
-CREATE INDEX IF NOT EXISTS idx_federation_sync_composite 
-ON federation_proof_sync_log(
-    sync_direction, proof_leaf_id, universe_root_id, servers_id,
-    id, status, timestamp, attempt_counter
-);
-
--- Multiverse optimization
-CREATE INDEX IF NOT EXISTS idx_multiverse_leaves_composite 
-ON multiverse_leaves(
-    multiverse_root_id, leaf_node_namespace,
-    asset_id, group_key, leaf_node_key
-);
-
--- Analyze existing tables
-ANALYZE universe_roots;
-ANALYZE universe_leaves;
-ANALYZE mssmt_nodes;
-ANALYZE universe_events;
-ANALYZE federation_proof_sync_log;
-ANALYZE multiverse_leaves;
-ANALYZE multiverse_roots;
+-- Indices on universe_leaves
+CREATE INDEX IF NOT EXISTS idx_universe_leaves_universe_root_id 
+ON universe_leaves (universe_root_id);
+CREATE INDEX IF NOT EXISTS idx_universe_leaves_asset_genesis_id 
+ON universe_leaves (asset_genesis_id);
+CREATE INDEX IF NOT EXISTS idx_universe_leaves_leaf_node_key_namespace 
+ON universe_leaves (leaf_node_key, leaf_node_namespace);
