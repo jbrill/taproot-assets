@@ -11,6 +11,176 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+
+type dbSizeStats struct {
+	tableName     string
+	rowCount     int64
+	dataSize     int64  // Size without indices
+	indexSize    int64  // Total size of all indices
+	totalSize    int64  // dataSize + indexSize
+}
+
+// measureDBSize gets table and index sizes from SQLite
+func measureDBSize(t *testing.T, db *BaseDB) map[string]*dbSizeStats {
+	stats := make(map[string]*dbSizeStats)
+
+	// First get list of all tables
+	rows, err := db.Query(`
+		SELECT DISTINCT
+			tbl_name,
+			type
+		FROM sqlite_master
+		WHERE type='table'
+	`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	tables := make([]string, 0)
+	for rows.Next() {
+		var name, tblType string
+		err := rows.Scan(&name, &tblType)
+		require.NoError(t, err)
+		tables = append(tables, name)
+
+		stats[name] = &dbSizeStats{
+			tableName: name,
+		}
+	}
+
+	// For each table, get its stats
+	for _, tableName := range tables {
+		// Get row count using COUNT(*)
+		var rowCount int64
+		err = db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM main.%q`, tableName)).Scan(&rowCount)
+		if err != nil {
+			t.Logf("Skipping row count for %s: %v", tableName, err)
+			continue
+		}
+		stats[tableName].rowCount = rowCount
+
+		// Get table size
+		var pageCount int64
+		err = db.QueryRow(`
+			SELECT COUNT(*) 
+			FROM dbstat 
+			WHERE name = ?
+		`, tableName).Scan(&pageCount)
+		if err != nil {
+			t.Logf("Skipping size stats for %s: %v", tableName, err)
+			continue
+		}
+
+		// Get page size (constant for the database)
+		var pageSize int64
+		err = db.QueryRow(`PRAGMA page_size`).Scan(&pageSize)
+		require.NoError(t, err)
+
+		stats[tableName].dataSize = pageCount * pageSize
+	}
+
+	// Get list of indices and their sizes
+	rows, err = db.Query(`
+		SELECT 
+			m.tbl_name as table_name,
+			m.name as index_name,
+			(SELECT COUNT(*) FROM dbstat WHERE name = m.name) as page_count,
+			(SELECT page_size FROM pragma_page_size) as page_size
+		FROM sqlite_master m
+		WHERE m.type = 'index'
+	`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			tableName string
+			indexName string
+			pageCount int64
+			pageSize  int64
+		)
+		err := rows.Scan(&tableName, &indexName, &pageCount, &pageSize)
+		if err != nil {
+			t.Logf("Skipping index stat: %v", err)
+			continue
+		}
+
+		if stat, ok := stats[tableName]; ok {
+			indexSize := pageCount * pageSize
+			stat.indexSize += indexSize
+			stat.totalSize = stat.dataSize + stat.indexSize
+		}
+	}
+
+	return stats
+}
+
+// prettyPrintSizeStats formats the size statistics nicely
+func prettyPrintSizeStats(t *testing.T, stats map[string]*dbSizeStats) {
+	var totalData, totalIndex int64
+
+	t.Log("\n=== Database Size Analysis ===")
+	t.Log("Table                   Rows      Data Size    Index Size   Index Overhead")
+	t.Log("----------------------------------------------------------------------")
+
+	var tables []string
+	for table := range stats {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+
+	for _, table := range tables {
+		stat := stats[table]
+		if stat.dataSize == 0 {
+			t.Logf("%-20s %8d %12s %12s %14s",
+				stat.tableName,
+				stat.rowCount,
+				"-",
+				"-",
+				"-",
+			)
+			continue
+		}
+
+		overhead := float64(stat.indexSize) / float64(stat.dataSize) * 100
+		t.Logf("%-20s %8d %12s %12s %14.1f%%",
+			stat.tableName,
+			stat.rowCount,
+			formatSize(stat.dataSize),
+			formatSize(stat.indexSize),
+			overhead,
+		)
+		
+		totalData += stat.dataSize
+		totalIndex += stat.indexSize
+	}
+
+	t.Log("----------------------------------------------------------------------")
+	if totalData > 0 {
+		totalOverhead := float64(totalIndex) / float64(totalData) * 100
+		t.Logf("%-20s %8s %12s %12s %14.1f%%",
+			"TOTAL", "-",
+			formatSize(totalData),
+			formatSize(totalIndex),
+			totalOverhead,
+		)
+	}
+}
+
+// formatSize returns human-readable file sizes
+func formatSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB",
+		float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
 // TestUniverseIndexPerformance tests that our new indices improve query
 // performance by comparing performance with and without indices.
 func TestUniverseIndexPerformance(t *testing.T) {
@@ -107,6 +277,11 @@ func TestUniverseIndexPerformance(t *testing.T) {
 
 			t.Logf("Test data creation took: %v", time.Since(dataStart))
 
+			// Measure size after data creation
+			t.Log("Measuring initial database size...")
+			initialSizes := measureDBSize(t, db.BaseDB)
+			prettyPrintSizeStats(t, initialSizes)
+
 			if withIndices {
 				t.Log("Analyzing tables...")
 				sqlDB := db.BaseDB
@@ -117,7 +292,7 @@ func TestUniverseIndexPerformance(t *testing.T) {
 			testQueries := []struct {
 				name string
 				fn   func() time.Duration
-			}{
+				}{
 				{
 					name: "universe root namespace",
 					fn: func() time.Duration {

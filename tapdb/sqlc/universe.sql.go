@@ -361,12 +361,11 @@ func (q *Queries) LogServerSync(ctx context.Context, arg LogServerSyncParams) er
 const queryAssetStatsPerDayPostgres = `-- name: QueryAssetStatsPerDayPostgres :many
 SELECT
     to_char(to_timestamp(event_timestamp), 'YYYY-MM-DD') AS day,
-    COUNT(*) FILTER (WHERE event_type = 'SYNC') AS sync_events,
-    COUNT(*) FILTER (WHERE event_type = 'NEW_PROOF') AS new_proof_events
+    SUM(CASE WHEN event_type = 'SYNC' THEN 1 ELSE 0 END) AS sync_events,
+    SUM(CASE WHEN event_type = 'NEW_PROOF' THEN 1 ELSE 0 END) AS new_proof_events
 FROM universe_events
-WHERE event_type IN ('SYNC', 'NEW_PROOF')
-    AND event_timestamp >= $1 
-    AND event_timestamp <= $2
+WHERE event_type IN ('SYNC', 'NEW_PROOF') AND
+      event_timestamp >= $1 AND event_timestamp <= $2
 GROUP BY day
 ORDER BY day
 `
@@ -481,34 +480,58 @@ func (q *Queries) QueryFederationGlobalSyncConfigs(ctx context.Context) ([]Feder
 }
 
 const queryFederationProofSyncLog = `-- name: QueryFederationProofSyncLog :many
-SELECT DISTINCT ON (log.id)
-    log.id,
-    log.status,
-    log.timestamp,
-    log.sync_direction,
-    log.attempt_counter,
+SELECT
+    log.id, status, timestamp, sync_direction, attempt_counter,
+
+    -- Select fields from the universe_servers table.
     server.id as server_id,
     server.server_host,
+
+    -- Select universe leaf related fields.
     leaf.minting_point as leaf_minting_point_bytes,
     leaf.script_key_bytes as leaf_script_key_bytes,
     mssmt_node.value as leaf_genesis_proof,
     genesis.gen_asset_id as leaf_gen_asset_id,
     genesis.asset_id as leaf_asset_id,
+
+    -- Select fields from the universe_roots table.
     root.asset_id as uni_asset_id,
     root.group_key as uni_group_key,
     root.proof_type as uni_proof_type
-FROM federation_proof_sync_log log
-    JOIN universe_servers server ON server.id = log.servers_id
-    JOIN universe_leaves leaf ON leaf.id = log.proof_leaf_id
-    JOIN mssmt_nodes mssmt_node ON leaf.leaf_node_key = mssmt_node.key 
-        AND leaf.leaf_node_namespace = mssmt_node.namespace
-    JOIN genesis_info_view genesis ON leaf.asset_genesis_id = genesis.gen_asset_id
-    JOIN universe_roots root ON root.id = log.universe_root_id
-WHERE (log.sync_direction = $1 OR $1 IS NULL)
-    AND (log.status = $2 OR $2 IS NULL)
-    AND (leaf.leaf_node_namespace = $3 OR $3 IS NULL)
-    AND (leaf.minting_point = $4 OR $4 IS NULL)
-    AND (leaf.script_key_bytes = $5 OR $5 IS NULL)
+
+FROM federation_proof_sync_log as log
+
+JOIN universe_leaves as leaf
+    ON leaf.id = log.proof_leaf_id
+
+JOIN mssmt_nodes mssmt_node
+     ON leaf.leaf_node_key = mssmt_node.key AND
+        leaf.leaf_node_namespace = mssmt_node.namespace
+
+JOIN genesis_info_view genesis
+     ON leaf.asset_genesis_id = genesis.gen_asset_id
+
+JOIN universe_servers as server
+    ON server.id = log.servers_id
+
+JOIN universe_roots as root
+    ON root.id = log.universe_root_id
+
+WHERE (log.sync_direction = $1
+           OR $1 IS NULL)
+        AND
+      (log.status = $2 OR $2 IS NULL)
+        AND
+
+      -- Universe leaves WHERE clauses.
+      (leaf.leaf_node_namespace = $3
+           OR $3 IS NULL)
+        AND
+      (leaf.minting_point = $4
+           OR $4 IS NULL)
+        AND
+      (leaf.script_key_bytes = $5
+           OR $5 IS NULL)
 `
 
 type QueryFederationProofSyncLogParams struct {
@@ -537,6 +560,8 @@ type QueryFederationProofSyncLogRow struct {
 	UniProofType          string
 }
 
+// Join on mssmt_nodes to get leaf related fields.
+// Join on genesis_info_view to get leaf related fields.
 func (q *Queries) QueryFederationProofSyncLog(ctx context.Context, arg QueryFederationProofSyncLogParams) ([]QueryFederationProofSyncLogRow, error) {
 	rows, err := q.db.QueryContext(ctx, queryFederationProofSyncLog,
 		arg.SyncDirection,
@@ -680,61 +705,62 @@ func (q *Queries) QueryMultiverseLeaves(ctx context.Context, arg QueryMultiverse
 const queryUniverseAssetStats = `-- name: QueryUniverseAssetStats :many
 
 WITH asset_supply AS (
-    SELECT 
-        SUM(nodes.sum) AS supply, 
-        gen.asset_id
+    SELECT SUM(nodes.sum) AS supply, gen.asset_id AS asset_id
     FROM universe_leaves leaves
-    JOIN universe_roots roots ON leaves.universe_root_id = roots.id
-    JOIN mssmt_nodes nodes ON leaves.leaf_node_key = nodes.key 
-        AND leaves.leaf_node_namespace = nodes.namespace
-    JOIN genesis_info_view gen ON leaves.asset_genesis_id = gen.gen_asset_id
+    JOIN universe_roots roots
+        ON leaves.universe_root_id = roots.id
+    JOIN mssmt_nodes nodes
+        ON leaves.leaf_node_key = nodes.key AND
+           leaves.leaf_node_namespace = nodes.namespace
+    JOIN genesis_info_view gen
+        ON leaves.asset_genesis_id = gen.gen_asset_id
     WHERE roots.proof_type = 'issuance'
     GROUP BY gen.asset_id
 ), group_supply AS (
-    SELECT 
-        sum AS num_assets,
-        uroots.group_key
+    SELECT sum AS num_assets, uroots.group_key AS group_key
     FROM mssmt_nodes nodes
-    JOIN mssmt_roots roots ON nodes.hash_key = roots.root_hash 
-        AND nodes.namespace = roots.namespace
-    JOIN universe_roots uroots ON roots.namespace = uroots.namespace_root
+    JOIN mssmt_roots roots
+      ON nodes.hash_key = roots.root_hash AND
+         nodes.namespace = roots.namespace
+    JOIN universe_roots uroots
+      ON roots.namespace = uroots.namespace_root
     WHERE uroots.proof_type = 'issuance'
 ), asset_info AS (
-    SELECT 
-        asset_supply.supply, 
-        group_supply.num_assets AS group_supply,
-        gen.asset_id,
-        gen.asset_tag AS asset_name,
-        gen.asset_type,
-        gen.block_height AS genesis_height,
-        gen.prev_out AS genesis_prev_out,
-        group_info.tweaked_group_key AS group_key,
-        gen.output_index AS anchor_index,
-        gen.anchor_txid
+    SELECT asset_supply.supply, group_supply.num_assets AS group_supply,
+           gen.asset_id AS asset_id, 
+           gen.asset_tag AS asset_name, gen.asset_type AS asset_type,
+           gen.block_height AS genesis_height, gen.prev_out AS genesis_prev_out,
+           group_info.tweaked_group_key AS group_key,
+           gen.output_index AS anchor_index, gen.anchor_txid AS anchor_txid
     FROM genesis_info_view gen
-    JOIN asset_supply ON asset_supply.asset_id = gen.asset_id
-    LEFT JOIN key_group_info_view group_info ON gen.gen_asset_id = group_info.gen_asset_id
-    LEFT JOIN group_supply ON group_supply.group_key = group_info.x_only_group_key
-    WHERE (gen.asset_tag = $5 OR $5 IS NULL)
-        AND (gen.asset_type = $6 OR $6 IS NULL)
-        AND (gen.asset_id = $7 OR $7 IS NULL)
+    JOIN asset_supply
+        ON asset_supply.asset_id = gen.asset_id
+    -- We use a LEFT JOIN here as not every asset has a group key, so this'll
+    -- generate rows that have NULL values for the group key fields if an asset
+    -- doesn't have a group key.
+    LEFT JOIN key_group_info_view group_info
+        ON gen.gen_asset_id = group_info.gen_asset_id
+    LEFT JOIN group_supply
+        ON group_supply.group_key = group_info.x_only_group_key
+    WHERE (gen.asset_tag = $5 OR $5 IS NULL) AND
+          (gen.asset_type = $6 OR $6 IS NULL) AND
+          (gen.asset_id = $7 OR $7 IS NULL)
 )
-SELECT /* FORCE_INDEX(universe_stats idx_universe_stats_asset_proof) */
-    asset_info.supply AS asset_supply,
-    asset_info.group_supply,
-    asset_info.asset_name,
-    asset_info.asset_type,
-    asset_info.asset_id,
-    asset_info.genesis_height,
-    asset_info.genesis_prev_out,
-    asset_info.group_key,
-    asset_info.anchor_index,
-    asset_info.anchor_txid,
-    COALESCE(us.total_asset_syncs, 0) AS total_syncs,
-    COALESCE(us.total_asset_proofs, 0) AS total_proofs
+SELECT asset_info.supply AS asset_supply,
+    asset_info.group_supply AS group_supply,
+    asset_info.asset_name AS asset_name,
+    asset_info.asset_type AS asset_type, asset_info.asset_id AS asset_id,
+    asset_info.genesis_height AS genesis_height,
+    asset_info.genesis_prev_out AS genesis_prev_out,
+    asset_info.group_key AS group_key,
+    asset_info.anchor_index AS anchor_index,
+    asset_info.anchor_txid AS anchor_txid,
+    universe_stats.total_asset_syncs AS total_syncs,
+    universe_stats.total_asset_proofs AS total_proofs
 FROM asset_info
-JOIN universe_stats us ON us.asset_id = asset_info.asset_id
-WHERE us.proof_type = 'issuance'
+JOIN universe_stats
+    ON asset_info.asset_id = universe_stats.asset_id
+WHERE universe_stats.proof_type = 'issuance'
 ORDER BY
     CASE WHEN $1 = 'asset_id' AND $2 = 0 THEN
              asset_info.asset_id END ASC,
@@ -839,21 +865,21 @@ func (q *Queries) QueryUniverseAssetStats(ctx context.Context, arg QueryUniverse
 }
 
 const queryUniverseLeaves = `-- name: QueryUniverseLeaves :many
-SELECT /* FORCE_INDEX(leaves idx_universe_leaves_composite) */
-    leaves.script_key_bytes,
-    gen.gen_asset_id,
-    nodes.value as genesis_proof,
-    nodes.sum as sum_amt,
-    gen.asset_id
+SELECT leaves.script_key_bytes, gen.gen_asset_id, nodes.value genesis_proof, 
+       nodes.sum sum_amt, gen.asset_id
 FROM universe_leaves leaves
-JOIN mssmt_nodes nodes ON leaves.leaf_node_key = nodes.key 
-    AND leaves.leaf_node_namespace = nodes.namespace
-JOIN genesis_info_view gen ON leaves.asset_genesis_id = gen.gen_asset_id
-WHERE leaves.leaf_node_namespace = $1
-    AND (leaves.minting_point = $2 
-        OR $2 IS NULL)
-    AND (leaves.script_key_bytes = $3 
-        OR $3 IS NULL)
+JOIN mssmt_nodes nodes
+    ON leaves.leaf_node_key = nodes.key AND
+        leaves.leaf_node_namespace = nodes.namespace
+JOIN genesis_info_view gen
+    ON leaves.asset_genesis_id = gen.gen_asset_id
+WHERE leaves.leaf_node_namespace = $1 
+        AND 
+    (leaves.minting_point = $2 OR 
+        $2 IS NULL) 
+        AND
+    (leaves.script_key_bytes = $3 OR 
+        $3 IS NULL)
 `
 
 type QueryUniverseLeavesParams struct {
@@ -935,39 +961,50 @@ func (q *Queries) QueryUniverseServers(ctx context.Context, arg QueryUniverseSer
 }
 
 const queryUniverseStats = `-- name: QueryUniverseStats :one
-WITH base_stats AS (
-    SELECT 
-        COALESCE(SUM(total_asset_syncs), 0) as total_syncs,
-        COALESCE(SUM(total_asset_proofs), 0) as total_proofs
+WITH stats AS (
+    SELECT total_asset_syncs, total_asset_proofs
     FROM universe_stats
-),
-group_count AS (
-    SELECT COUNT(*) as total_num_groups
-    FROM universe_roots 
+), group_ids AS (
+    SELECT id
+    FROM universe_roots
     WHERE group_key IS NOT NULL
-),
-asset_count AS (
-    SELECT COUNT(DISTINCT nodes.hash_key) as total_num_assets
+), asset_keys AS (
+    SELECT hash_key
     FROM mssmt_nodes nodes
     JOIN mssmt_roots roots
-      ON nodes.hash_key = roots.root_hash 
-      AND nodes.namespace = roots.namespace
+      ON nodes.hash_key = roots.root_hash AND
+         nodes.namespace = roots.namespace
     JOIN universe_roots uroots
       ON roots.namespace = uroots.namespace_root
+), aggregated AS (
+    SELECT COALESCE(SUM(stats.total_asset_syncs), 0) AS total_syncs,
+           COALESCE(SUM(stats.total_asset_proofs), 0) AS total_proofs,
+           0 AS total_num_groups,
+           0 AS total_num_assets
+    FROM stats
+    UNION ALL
+    SELECT 0 AS total_syncs,
+           0 AS total_proofs,
+           COALESCE(COUNT(group_ids.id), 0) AS total_num_groups,
+           0 AS total_num_assets
+    FROM group_ids
+    UNION ALL
+    SELECT 0 AS total_syncs,
+           0 AS total_proofs,
+           0 AS total_num_groups,
+           COALESCE(COUNT(asset_keys.hash_key), 0) AS total_num_assets
+    FROM asset_keys
 )
-SELECT 
-    base_stats.total_syncs,
-    base_stats.total_proofs,
-    group_count.total_num_groups,
-    asset_count.total_num_assets
-FROM base_stats
-CROSS JOIN group_count
-CROSS JOIN asset_count
+SELECT SUM(total_syncs) AS total_syncs,
+       SUM(total_proofs) AS total_proofs,
+       SUM(total_num_groups) AS total_num_groups,
+       SUM(total_num_assets) AS total_num_assets
+FROM aggregated
 `
 
 type QueryUniverseStatsRow struct {
-	TotalSyncs     interface{}
-	TotalProofs    interface{}
+	TotalSyncs     int64
+	TotalProofs    int64
 	TotalNumGroups int64
 	TotalNumAssets int64
 }
