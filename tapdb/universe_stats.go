@@ -285,16 +285,16 @@ type UniverseStats struct {
 
 	clock clock.Clock
 
-	statsMtx         sync.Mutex
+	statsMtx         sync.RWMutex
 	statsSnapshot    atomic.Pointer[universe.AggregateStats]
 	statsCacheLogger *cacheLogger
 	statsRefresh     *time.Timer
 
-	eventsMtx         sync.Mutex
+	eventsMtx         sync.RWMutex
 	assetEventsCache  assetEventsCache
 	eventsCacheLogger *cacheLogger
 
-	syncStatsMtx     sync.Mutex
+	syncStatsMtx     sync.RWMutex
 	syncStatsCache   *atomicSyncStatsCache
 	syncStatsRefresh *time.Timer
 }
@@ -635,7 +635,9 @@ func (u *UniverseStats) QueryAssetStatsPerDay(ctx context.Context,
 	// First, we'll check to see if we already have a cached result for
 	// this query.
 	query := newEventQuery(q)
+	u.eventsMtx.RLock()
 	cachedResult, err := u.assetEventsCache.Get(query)
+	u.eventsMtx.RUnlock()
 	if err == nil {
 		u.eventsCacheLogger.Hit()
 		return cachedResult, nil
@@ -748,16 +750,19 @@ func (u *UniverseStats) QuerySyncStats(ctx context.Context,
 		Query: q,
 	}
 
-	// First, check the cache to see if we already have a cached result for
-	// this query.
-	syncSnapshots := u.syncStatsCache.fetchQuery(q)
+	// Check the cache to see if we already have a cached result.
+	var syncSnapshots []universe.AssetSyncSnapshot
+	
+	u.syncStatsMtx.RLock()
+	syncSnapshots = u.syncStatsCache.fetchQuery(q)
+	u.syncStatsMtx.RUnlock()
+
 	if syncSnapshots != nil {
 		resp.SyncStats = syncSnapshots
 		return resp, nil
 	}
 
-	// Otherwise, we'll grab the main mutex so we can qury the db then
-	// cache the result.
+	// Now, get write lock for cache update.
 	u.syncStatsMtx.Lock()
 	defer u.syncStatsMtx.Unlock()
 
